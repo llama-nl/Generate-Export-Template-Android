@@ -1,0 +1,144 @@
+name: Build Godot Android Template
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-editor-arm64:
+    runs-on: ubuntu-latest
+    env:
+      PYTHONUNBUFFERED: 1
+      SCRIPT_AES256_ENCRYPTION_KEY: ${{ secrets.SCRIPT_AES256_ENCRYPTION_KEY }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Require AES encryption key
+        run: |
+          if [ -z "$SCRIPT_AES256_ENCRYPTION_KEY" ]; then
+            echo "ERROR: SCRIPT_AES256_ENCRYPTION_KEY secret is not set. Aborting."
+            exit 1
+          fi
+          echo "AES encryption key found. Going to next step."
+
+      - name: Setup Python and SCons
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.8'
+          
+      - name: Install SCons
+        run: |
+          python -m pip install --upgrade pip
+          pip install "scons>=4.0"
+
+      - name: Setup Java 17 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Install OS packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential unzip wget git p7zip-full cmake pkg-config curl
+
+      - name: Prepare Android SDK root
+        run: |
+          echo "ANDROID_SDK_ROOT=$RUNNER_TEMP/android-sdk" >> $GITHUB_ENV
+          echo "ANDROID_HOME=$RUNNER_TEMP/android-sdk" >> $GITHUB_ENV
+          mkdir -p "$RUNNER_TEMP/android-sdk"
+
+      - name: Install Android command-line tools
+        run: |
+          SDKROOT="$RUNNER_TEMP/android-sdk"
+          cd "$SDKROOT"
+          wget -q https://dl.google.com/android/repository/commandlinetools-linux-13114758_latest.zip -O cmdtools.zip
+          unzip -q cmdtools.zip -d cmdline-tools
+          mv cmdline-tools/cmdline-tools cmdline-tools/latest 2>/dev/null || true
+          echo "$SDKROOT/cmdline-tools/latest/bin" >> $GITHUB_PATH
+          echo "$SDKROOT/platform-tools" >> $GITHUB_PATH
+          rm cmdtools.zip
+
+      - name: Install Android SDK components
+        env:
+          ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
+        run: |
+          sdkmanager --sdk_root="$ANDROID_SDK_ROOT" \
+            "platform-tools" \
+            "build-tools;35.0.0" \
+            "platforms;android-35" \
+            "cmdline-tools;latest" \
+            "cmake;3.10.2.4988404" \
+            "ndk;28.1.13356709"
+          yes | sdkmanager --sdk_root="$ANDROID_SDK_ROOT" --licenses
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/28.1.13356709" >> $GITHUB_ENV
+
+      - name: Clone latest stable Godot release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
+            https://api.github.com/repos/godotengine/godot/releases/latest \
+            | grep '"tag_name"' | cut -d '"' -f4)
+          git clone --depth 1 --branch "$TAG" https://github.com/godotengine/godot.git godot
+
+      - name: Install Swappy libraries
+        run: |
+          cd godot
+
+          # If the expected swappy static libs already exist, skip download/extract.
+          if [ -f thirdparty/swappy-frame-pacing/arm64-v8a/libswappy_static.a ] && [ -f thirdparty/swappy-frame-pacing/armeabi-v7a/libswappy_static.a ]; then
+            echo "Swappy libs already present — skipping download/extract."
+            ls -la thirdparty/swappy-frame-pacing || true
+          else
+            mkdir -p thirdparty/swappy-frame-pacing
+            echo "Downloading swappy archive..."
+            wget -q https://github.com/godotengine/godot-swappy/releases/download/from-source-2025-01-31/godot-swappy.7z -O swappy.7z
+            echo "Extracting swappy..."
+            7z x swappy.7z -othirdparty/swappy-frame-pacing -y -aos
+            rm -f swappy.7z
+            echo "Swappy installed."
+          fi
+            
+      - name: Build Android Export Templates (Release)
+        working-directory: godot
+        env:
+          ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
+          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
+        run: |
+          scons platform=android target=template_release arch=arm32 tools=no swappy=yes -j$(nproc)
+          scons platform=android target=template_release arch=arm64 tools=no swappy=yes generate_apk=yes -j$(nproc)
+
+      - name: Upload Android Export Templates (release)
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-export-templates
+          path: godot/bin/*.apk
+          if-no-files-found: ignore
+
+      - name: Upload Android Source (release)
+        uses: actions/upload-artifact@v4
+        with:
+          name: android_source
+          path: godot/bin/*.zip
+          if-no-files-found: ignore
+          
+      - name: Clean Android Gradle build output
+        working-directory: godot/platform/android/java
+        run: ./gradlew clean || true
+
+      - name: Clean SCons build intermediates
+        working-directory: godot
+        run: |
+          scons -c || true
+          rm -rf .scons* || true
+
+      - name: Extra environment cleanup
+        run: |
+          sudo apt-get clean || true
+          sudo rm -rf /var/lib/apt/lists/* || true
+          rm -rf /tmp/* /var/tmp/* || true
+          rm -rf $HOME/.gradle/caches/* || true
+          rm -rf $HOME/.android/* || true
+          
