@@ -6,17 +6,17 @@ This repository includes a GitHub Actions workflow designed to compile custom Go
 
 **Automatic Source Fetching:** Clones the latest stable Godot release automatically.
 
-**Architecture Support:** Builds for both arm32 (v7) and arm64 (v8).
+**Architecture Support:** Builds for both `arm32 (v7)` and `arm64 (v8)`.
 
 **Swappy Integration:** Includes the Android Frame Pacing library for smoother rendering.
 
 **Security:** Supports AES256 script encryption to protect your project's source code.
 
-**Artifacts:** Generates both the .apk templates and the android_source.zip required for Gradle builds.
+**Artifacts:** Generates both the `.apk` templates and the `android_source.zip` required for Gradle builds.
 
 ## 🛠️ Prerequisites
 
-Before running the workflow, you must set up your Repository Secret. The workflow is designed to fail early if this key is missing to prevent unencrypted builds.
+create a new repository and create a `build.yml` file inside `.github/workflows` folder then copy the build code from `build_template.yml` paste it inside the `build.yml` file. 
 
 Navigate to your repository `Settings > Secrets and variables > Actions`
 
@@ -31,8 +31,11 @@ https://onecompiler.com/python
 and run this code
 ```python
 import os
-print(os.urandom(32).hex()
+print(os.urandom(32).hex())
+
 ```
+
+Before running the workflow, you must set up your Repository Secret. The workflow is designed to fail early if this key is missing to prevent unencrypted builds.
 
 ## 🚀 How to Run
 Since this workflow uses the `workflow_dispatch trigger`, it must be started manually:
