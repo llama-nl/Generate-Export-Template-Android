@@ -47,5 +47,4 @@ Select "Build Godot Android Template" from the sidebar.
 Click the Run workflow dropdown and press the green button.
 
 ## Video Tutorial 
-[![YouTube](https://img.youtube.com/vi/VIDEO_ID/0.jpg)](https://www.youtube.com/watch?v=VIDEO_ID)
-
+[![YouTube](https://img.youtube.com/vi/RlDhthTqKEkRrGpe/0.jpg)](https://www.youtube.com/watch?v=RlDhthTqKEkRrGpe)
