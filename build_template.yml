@@ -53,7 +53,7 @@ jobs:
         run: |
           SDKROOT="$RUNNER_TEMP/android-sdk"
           cd "$SDKROOT"
-          wget -q https://dl.google.com/android/repository/commandlinetools-linux-13114758_latest.zip -O cmdtools.zip
+          wget -q https://dl.google.com/android/repository/commandlinetools-linux-14742923_latest.zip -O cmdtools.zip
           unzip -q cmdtools.zip -d cmdline-tools
           mv cmdline-tools/cmdline-tools cmdline-tools/latest 2>/dev/null || true
           echo "$SDKROOT/cmdline-tools/latest/bin" >> $GITHUB_PATH
@@ -66,7 +66,7 @@ jobs:
         run: |
           sdkmanager --sdk_root="$ANDROID_SDK_ROOT" \
             "platform-tools" \
-            "build-tools;35.0.0" \
+            "build-tools;35.0.1" \
             "platforms;android-35" \
             "cmdline-tools;latest" \
             "cmake;3.10.2.4988404" \
