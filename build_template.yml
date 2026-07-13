@@ -1,33 +1,173 @@
-name: Build Godot Android Template
+name: Build Godot Export Templates (Windows + Android)
 
 on:
   workflow_dispatch:
+    inputs:
+      android_editor:
+        description: "Build Android editor binary (target=editor, tools=yes)"
+        type: boolean
+        default: false
+      android_template_release:
+        description: "Build Android release export template (target=template_release)"
+        type: boolean
+        default: true
+      android_template_debug:
+        description: "Build Android debug export template (target=template_debug)"
+        type: boolean
+        default: false
+      windows_editor:
+        description: "Build Windows editor binary (target=editor, tools=yes)"
+        type: boolean
+        default: false
+      windows_template_release:
+        description: "Build Windows release export template (target=template_release)"
+        type: boolean
+        default: true
+      windows_template_debug:
+        description: "Build Windows debug export template (target=template_debug)"
+        type: boolean
+        default: false
+      run_encryption_script:
+        description: "Run the Godot-Secure AES encryption step against the source before building"
+        type: boolean
+        default: true
+      use_vulkan:
+        description: "Enable Vulkan support (Disabling this optimizes templates for OpenGL/GLES3 only)"
+        type: boolean
+        default: true
 
 jobs:
-  build-editor-arm64:
+  # -------------------------------------------------------------------------
+  # Job 1: Resolve the latest Godot release version
+  # -------------------------------------------------------------------------
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      godot_tag:   ${{ steps.tag.outputs.tag }}
+      run_android: ${{ inputs.android_editor || inputs.android_template_release || inputs.android_template_debug }}
+      run_windows: ${{ inputs.windows_editor || inputs.windows_template_release || inputs.windows_template_debug }}
+    steps:
+      - name: Resolve latest Godot tag
+        id: tag
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
+            https://api.github.com/repos/godotengine/godot/releases/latest \
+            | grep '"tag_name"' | cut -d '"' -f4)
+          if [ -z "$TAG" ]; then
+            echo "ERROR: could not resolve latest Godot tag."
+            exit 1
+          fi
+          echo "Resolved Godot tag: $TAG"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+  # -------------------------------------------------------------------------
+  # Job 2: Prepare engine source, patch with Godot-Secure & share single token
+  # -------------------------------------------------------------------------
+  prepare:
+    needs: resolve
+    if: needs.resolve.outputs.run_android == 'true' || needs.resolve.outputs.run_windows == 'true'
     runs-on: ubuntu-latest
     env:
-      PYTHONUNBUFFERED: 1
       SCRIPT_AES256_ENCRYPTION_KEY: ${{ secrets.SCRIPT_AES256_ENCRYPTION_KEY }}
-
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - name: Clone Godot ${{ needs.resolve.outputs.godot_tag }}
+        run: |
+          git clone --depth 1 --branch "${{ needs.resolve.outputs.godot_tag }}" \
+            https://github.com/godotengine/godot.git godot
 
       - name: Require AES encryption key
+        if: ${{ inputs.run_encryption_script }}
         run: |
           if [ -z "$SCRIPT_AES256_ENCRYPTION_KEY" ]; then
             echo "ERROR: SCRIPT_AES256_ENCRYPTION_KEY secret is not set. Aborting."
             exit 1
           fi
-          echo "AES encryption key found. Going to next step."
 
-      - name: Setup Python and SCons
-        uses: actions/setup-python@v4
+      - name: Download Godot-Secure AES-256 script
+        if: ${{ inputs.run_encryption_script }}
+        run: |
+          curl -fL -o aes_secure.py \
+            "https://github.com/KnifeXRage/Godot-Secure/releases/download/v4.0-Released/Godot.Secure.AES-256.Release-v4_v4.6.x.-.Latest.py"
+
+      - name: Patch script for non-interactive use & fix Godot 4.4+ title hook
+        if: ${{ inputs.run_encryption_script }}
+        run: |
+          python3 << 'PYEOF'
+          with open("aes_secure.py", "r") as f:
+              content = f.read()
+
+          mock = (
+              "import builtins as _b\n"
+              "_answers = iter(['yes', 'no', 'no', 'no', 'no'])\n"
+              "def _auto_input(prompt=''):\n"
+              "    import sys; sys.stdout.write(str(prompt)); sys.stdout.flush()\n"
+              "    ans = next(_answers, 'no'); print(ans); return ans\n"
+              "_b.input = _auto_input\n\n"
+          )
+
+          content = content.replace('set_title(TTR("Export"));', 'set_title(TTR("Export Project"));')
+
+          with open("aes_secure.py", "w") as f:
+              f.write(mock + content)
+          print("Script patched successfully")
+          PYEOF
+
+      - name: Run AES-256 encryption on Godot source
+        if: ${{ inputs.run_encryption_script }}
+        env:
+          SCRIPT_AES256_ENCRYPTION_KEY: ${{ secrets.SCRIPT_AES256_ENCRYPTION_KEY }}
+        run: |
+          python3 aes_secure.py ./godot || true
+          rm -f aes_secure.py
+
+      - name: Verify Godot-Secure patches applied
+        if: ${{ inputs.run_encryption_script }}
+        run: |
+          echo "--- Verifying critical Godot-Secure patches ---"
+          if [ ! -f "./godot/core/crypto/security_token.h" ]; then
+            echo "FAIL: security_token.h was not created."
+            exit 1
+          fi
+          if ! grep -q "security_token.h" ./godot/core/io/file_access_encrypted.cpp; then
+            echo "FAIL: security_token.h not included in file_access_encrypted.cpp."
+            exit 1
+          fi
+          echo "--- All critical security patches verified ---"
+
+      - name: Upload patched Godot source
+        uses: actions/upload-artifact@v4
         with:
-          python-version: '3.8'
-          
-      - name: Install SCons
+          name: godot-source
+          path: godot/
+          retention-days: 1
+
+  # -------------------------------------------------------------------------
+  # Job 3: Android Build Job
+  # -------------------------------------------------------------------------
+  android:
+    needs: [resolve, prepare]
+    if: needs.resolve.outputs.run_android == 'true'
+    runs-on: ubuntu-latest
+    env:
+      PYTHONUNBUFFERED: 1
+    steps:
+      - name: Download patched Godot source
+        uses: actions/download-artifact@v4
+        with:
+          name: godot-source
+          path: godot
+
+      - name: Restore executable permissions
+        run: chmod +x godot/platform/android/java/gradlew
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install SCons via Pip
         run: |
           python -m pip install --upgrade pip
           pip install "scons>=4.0"
@@ -38,10 +178,10 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Install OS packages
+      - name: Install OS dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential unzip wget git p7zip-full cmake pkg-config curl
+          sudo apt-get install -y build-essential unzip wget git p7zip-full cmake pkg-config curl gettext
 
       - name: Prepare Android SDK root
         run: |
@@ -74,71 +214,180 @@ jobs:
           yes | sdkmanager --sdk_root="$ANDROID_SDK_ROOT" --licenses
           echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/28.1.13356709" >> $GITHUB_ENV
 
-      - name: Clone latest stable Godot release
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          TAG=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
-            https://api.github.com/repos/godotengine/godot/releases/latest \
-            | grep '"tag_name"' | cut -d '"' -f4)
-          git clone --depth 1 --branch "$TAG" https://github.com/godotengine/godot.git godot
-
       - name: Install Swappy libraries
         run: |
           cd godot
-
-          # If the expected swappy static libs already exist, skip download/extract.
-          if [ -f thirdparty/swappy-frame-pacing/arm64-v8a/libswappy_static.a ] && [ -f thirdparty/swappy-frame-pacing/armeabi-v7a/libswappy_static.a ]; then
+          if [ -f thirdparty/swappy-frame-pacing/arm64-v8a/libswappy_static.a ] && \
+             [ -f thirdparty/swappy-frame-pacing/armeabi-v7a/libswappy_static.a ]; then
             echo "Swappy libs already present — skipping download/extract."
-            ls -la thirdparty/swappy-frame-pacing || true
           else
             mkdir -p thirdparty/swappy-frame-pacing
-            echo "Downloading swappy archive..."
             wget -q https://github.com/godotengine/godot-swappy/releases/download/from-source-2025-01-31/godot-swappy.7z -O swappy.7z
-            echo "Extracting swappy..."
             7z x swappy.7z -othirdparty/swappy-frame-pacing -y -aos
             rm -f swappy.7z
-            echo "Swappy installed."
           fi
-            
-      - name: Build Android Export Templates (Release)
+
+      - name: Set Rendering Backend Flags
+        run: |
+          if [ "${{ inputs.use_vulkan }}" = "true" ]; then
+            echo "RENDER_FLAGS=vulkan=yes opengl=yes" >> $GITHUB_ENV
+          else
+            echo "RENDER_FLAGS=vulkan=no opengl=yes" >> $GITHUB_ENV
+          fi
+
+      - name: Cache SCons build (Android)
+        uses: actions/cache@v4
+        with:
+          path: |
+            godot/.sconsign.dblite
+            godot/bin/
+          key: android-${{ needs.resolve.outputs.godot_tag }}-vulkan-${{ inputs.use_vulkan }}-${{ hashFiles('godot/**/*.cpp', 'godot/**/*.h', 'godot/SConstruct', 'godot/SCsub') }}
+          restore-keys: |
+            android-${{ needs.resolve.outputs.godot_tag }}-vulkan-${{ inputs.use_vulkan }}-
+
+      - name: Build Android release export templates
+        if: ${{ inputs.android_template_release }}
         working-directory: godot
         env:
           ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
           ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
         run: |
-          scons platform=android target=template_release arch=arm32 tools=no swappy=yes -j$(nproc)
-          scons platform=android target=template_release arch=arm64 tools=no swappy=yes generate_apk=yes -j$(nproc)
+          scons platform=android target=template_release arch=arm32 tools=no swappy=yes ${{ env.RENDER_FLAGS }} -j$(nproc)
+          scons platform=android target=template_release arch=arm64 tools=no swappy=yes generate_apk=yes ${{ env.RENDER_FLAGS }} -j$(nproc)
 
-      - name: Upload Android Export Templates (release)
+      - name: Build Android debug export templates
+        if: ${{ inputs.android_template_debug }}
+        working-directory: godot
+        env:
+          ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
+          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
+        run: |
+          scons platform=android target=template_debug arch=arm32 tools=no swappy=yes ${{ env.RENDER_FLAGS }} -j$(nproc)
+          scons platform=android target=template_debug arch=arm64 tools=no swappy=yes generate_apk=yes ${{ env.RENDER_FLAGS }} -j$(nproc)
+
+      - name: Build Android editor
+        if: ${{ inputs.android_editor }}
+        working-directory: godot
+        env:
+          ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
+          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
+        run: |
+          scons platform=android target=editor arch=arm64 tools=yes swappy=yes generate_apk=yes ${{ env.RENDER_FLAGS }} -j$(nproc)
+
+      - name: Upload Android Export Templates
+        if: ${{ inputs.android_template_release || inputs.android_template_debug }}
         uses: actions/upload-artifact@v4
         with:
           name: android-export-templates
-          path: godot/bin/*.apk
+          path: |
+            godot/bin/*.apk
+            godot/bin/*.zip
           if-no-files-found: ignore
 
-      - name: Upload Android Source (release)
+      - name: Upload Android Editor (APK Only)
+        if: ${{ inputs.android_editor }}
         uses: actions/upload-artifact@v4
         with:
-          name: android_source
-          path: godot/bin/*.zip
+          name: android-editor
+          path: godot/bin/android_editor_builds/android*editor*.apk
           if-no-files-found: ignore
-          
-      - name: Clean Android Gradle build output
-        working-directory: godot/platform/android/java
-        run: ./gradlew clean || true
 
       - name: Clean SCons build intermediates
+        if: always()
         working-directory: godot
         run: |
           scons -c || true
           rm -rf .scons* || true
 
-      - name: Extra environment cleanup
+  # -------------------------------------------------------------------------
+  # Job 4: Windows Build Job
+  # -------------------------------------------------------------------------
+  windows:
+    needs: [resolve, prepare]
+    if: needs.resolve.outputs.run_windows == 'true'
+    runs-on: ubuntu-latest
+    env:
+      SCONSFLAGS: verbose=yes warnings=all use_lto=yes
+    steps:
+      - name: Download patched Godot source
+        uses: actions/download-artifact@v4
+        with:
+          name: godot-source
+          path: godot
+
+      - name: Install dependencies
         run: |
-          sudo apt-get clean || true
-          sudo rm -rf /var/lib/apt/lists/* || true
-          rm -rf /tmp/* /var/tmp/* || true
-          rm -rf $HOME/.gradle/caches/* || true
-          rm -rf $HOME/.android/* || true
-          
+          sudo apt-get update
+          sudo apt-get install -y build-essential scons pkg-config python3 \
+               mingw-w64 clang zip unzip curl git cmake gettext
+          sudo update-alternatives --install /usr/bin/x86_64-w64-mingw32-g++ \
+            x86_64-w64-mingw32-g++ /usr/bin/x86_64-w64-mingw32-g++-posix 100
+          sudo update-alternatives --install /usr/bin/x86_64-w64-mingw32-gcc \
+            x86_64-w64-mingw32-gcc /usr/bin/x86_64-w64-mingw32-gcc-posix 100
+          sudo update-alternatives --set x86_64-w64-mingw32-g++ \
+            /usr/bin/x86_64-w64-mingw32-g++-posix
+          sudo update-alternatives --set x86_64-w64-mingw32-gcc \
+            /usr/bin/x86_64-w64-mingw32-gcc-posix
+
+      - name: Set Rendering Backend Flags
+        run: |
+          if [ "${{ inputs.use_vulkan }}" = "true" ]; then
+            echo "RENDER_FLAGS=vulkan=yes opengl=yes" >> $GITHUB_ENV
+          else
+            echo "RENDER_FLAGS=vulkan=no opengl=yes" >> $GITHUB_ENV
+          fi
+
+      - name: Cache SCons build (Windows)
+        uses: actions/cache@v4
+        with:
+          path: |
+            godot/.sconsign.dblite
+            godot/bin/
+          key: windows-${{ needs.resolve.outputs.godot_tag }}-vulkan-${{ inputs.use_vulkan }}-${{ hashFiles('godot/**/*.cpp', 'godot/**/*.h', 'godot/SConstruct', 'godot/SCsub') }}
+          restore-keys: |
+            windows-${{ needs.resolve.outputs.godot_tag }}-vulkan-${{ inputs.use_vulkan }}-
+
+      - name: Build Windows release export template
+        if: ${{ inputs.windows_template_release }}
+        working-directory: godot
+        run: scons platform=windows target=template_release arch=x86_64 tools=no d3d12=no ${{ env.RENDER_FLAGS }} -j$(nproc)
+
+      - name: Build Windows debug export template
+        if: ${{ inputs.windows_template_debug }}
+        working-directory: godot
+        run: scons platform=windows target=template_debug arch=x86_64 tools=no d3d12=no ${{ env.RENDER_FLAGS }} -j$(nproc)
+
+      - name: Build Windows editor
+        if: ${{ inputs.windows_editor }}
+        working-directory: godot
+        run: scons platform=windows target=editor arch=x86_64 tools=yes d3d12=no ${{ env.RENDER_FLAGS }} -j$(nproc)
+
+      - name: Package Windows templates
+        if: ${{ inputs.windows_template_release || inputs.windows_template_debug }}
+        run: |
+          mkdir templates_windows
+          cp godot/bin/*windows*template*.exe templates_windows/ 2>/dev/null || cp godot/bin/*windows*.exe templates_windows/
+          cd templates_windows
+          zip -9 -r ../export_templates_windows.zip .
+
+      - name: Upload Windows templates
+        if: ${{ inputs.windows_template_release || inputs.windows_template_debug }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-templates
+          path: export_templates_windows.zip
+
+      - name: Upload Windows editor binary
+        if: ${{ inputs.windows_editor }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-editor
+          path: godot/bin/*windows*editor*.exe
+          if-no-files-found: ignore
+
+      - name: Clean SCons build intermediates
+        if: always()
+        working-directory: godot
+        run: |
+          scons -c || true
+          rm -rf .scons* || true
